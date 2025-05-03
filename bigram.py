@@ -6,8 +6,8 @@ import torch.nn.functional as F
 batch_size = 32
 block_size = 8
 max_iters = 3000
-eval_interval = 300
-learning_rate = 1e-2
+eval_interval = 500
+learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 32 # embedding dimension
@@ -63,12 +63,36 @@ def estimate_loss(): # average loss over multiple batches
     # return the average loss for train and val sets
     return out
 
+class Head(nn.Module):
+    """ one head of self-attention """
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+
+    def forward(self, x):
+        B,T,C = x.shape
+        k = self.key(x) # (B, T, C)
+        q = self.query(x) # (B, T, C)
+        # compute attention scores ("affinities")
+        wei = q @ k.transpose(-2, -2) * C**-0.5 # (B, T, C) @ (B, C, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
+        # perform the weighted aggregation of the values
+        v = self.value(x)
+        out = wei @ v
+        return out
+
 # super simple bigram model
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd) # (vocab_size, vocab_size)
         self.position_embedding_table = nn.Embedding(block_size, n_embd) # (block_size, n_embd)
+        self.selfattention_head = Head(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size) # (n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -79,6 +103,7 @@ class BigramLanguageModel(nn.Module):
         token_embeddings = self.token_embedding_table(idx) # (batch_size, block_size, vocab_size)
         position_embeddings = self.position_embedding_table(torch.arange(T, device=device)) # (block_size, n_embd)
         x = token_embeddings + position_embeddings # (batch_size, block_size, n_embd)
+        x = self.selfattention_head(x)
         logits = self.lm_head(x) # (batch_size, block_size, vocab_size)
         if targets is not None:
             B, T, C = logits.shape
@@ -91,6 +116,8 @@ class BigramLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
       # idx is (B, T) array of indices in the current context
       for _ in range(max_new_tokens):
+        # crop idx to the lasst block_size tokens
+        idx_cond = idx[:, -block_size]
         # get the predictions
         logits = self(idx)
         # focus only on the last time step
